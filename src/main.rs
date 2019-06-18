@@ -115,42 +115,44 @@ impl FastqChecker {
 }
 
 
-struct RuntimeParams<'a> {
-    len_threshold: usize,
+struct RuntimeInfo<'a> {
+    args: &'a Cli,
     rm_tiles: HashSet<String>,
     rm_reads: HashSet<String>,
-    trim_r1: Option<i32>,
-    trim_r2: Option<i32>,
-    criteria: Vec<&'a Fn(&FastqEntry, &FastqEntry, &RuntimeParams) -> bool>
+    criteria: Vec<&'a Fn(&FastqEntry, &FastqEntry, &RuntimeInfo) -> bool>,
+    read_pairs_checked: i64,
+    read_pairs_removed: i64,
+    read_pairs_remaining: i64,
 }
 
-impl<'a> RuntimeParams <'a>{
-    fn new(args: &Cli) -> RuntimeParams {
+impl<'a> RuntimeInfo <'a>{
+    fn new(args: &Cli) -> RuntimeInfo {
         let mut rm_tiles = HashSet::new();
         let mut rm_reads = HashSet::new();
 
-        let mut criteria: Vec<&Fn(&FastqEntry, &FastqEntry, &RuntimeParams) -> bool> = vec![&check_read];
+        let mut criteria: Vec<&Fn(&FastqEntry, &FastqEntry, &RuntimeInfo) -> bool> = vec![&check_read];
 
         if !args.remove_tiles.is_empty() {
-            RuntimeParams::build_rm_tiles(&args.remove_tiles, &mut rm_tiles);
+            RuntimeInfo::build_rm_tiles(&args.remove_tiles, &mut rm_tiles);
             criteria.push(&tile_check_read);
         }
 
         match &args.remove_reads {
             Some(file_path) => {
-                RuntimeParams::build_rm_reads(file_path.to_path_buf(), &mut rm_reads);
+                RuntimeInfo::build_rm_reads(file_path.to_path_buf(), &mut rm_reads);
                 criteria.push(&id_check_read);
             },
             None => {}
         }
 
-        RuntimeParams {
-            len_threshold: args.len_threshold,
+        RuntimeInfo {
+            args: args,
             rm_tiles: rm_tiles,
             rm_reads: rm_reads,
-            trim_r1: args.trim_r1,
-            trim_r2: args.trim_r2,
-            criteria: criteria
+            criteria: criteria,
+            read_pairs_checked: 0,
+            read_pairs_removed: 0,
+            read_pairs_remaining: 0,
         }
     }
 
@@ -171,13 +173,13 @@ impl<'a> RuntimeParams <'a>{
 }
 
 
-fn check_read(entry_1: &FastqEntry, entry_2: &FastqEntry, params: &RuntimeParams) -> bool {
-    entry_1.seq.chars().count() > params.len_threshold && entry_2.seq.chars().count() > params.len_threshold
+fn check_read(entry_1: &FastqEntry, entry_2: &FastqEntry, info: &RuntimeInfo) -> bool {
+    entry_1.seq.chars().count() > info.args.len_threshold && entry_2.seq.chars().count() > info.args.len_threshold
 }
 
 
-fn tile_check_read(entry_1: &FastqEntry, _entry_2: &FastqEntry, params: &RuntimeParams) -> bool {
-    let tiles = &params.rm_tiles;
+fn tile_check_read(entry_1: &FastqEntry, _entry_2: &FastqEntry, info: &RuntimeInfo) -> bool {
+    let tiles = &info.rm_tiles;
     if tiles.contains(&entry_1.tile_id) {
         false
     } else {
@@ -186,8 +188,8 @@ fn tile_check_read(entry_1: &FastqEntry, _entry_2: &FastqEntry, params: &Runtime
 }
 
 
-fn id_check_read(entry_1: &FastqEntry, _entry_2: &FastqEntry, params: &RuntimeParams) -> bool {
-    let reads = &params.rm_reads;
+fn id_check_read(entry_1: &FastqEntry, _entry_2: &FastqEntry, info: &RuntimeInfo) -> bool {
+    let reads = &info.rm_reads;
     if reads.contains(&entry_1.read_id) {
         false
     } else {
@@ -196,10 +198,10 @@ fn id_check_read(entry_1: &FastqEntry, _entry_2: &FastqEntry, params: &RuntimePa
 }
    
 
-fn check_reads(entry_1: &FastqEntry, entry_2: &FastqEntry, params: &RuntimeParams) -> bool {
+fn check_reads(entry_1: &FastqEntry, entry_2: &FastqEntry, info: &RuntimeInfo) -> bool {
     let mut result: bool = true;
-    for check_func in &params.criteria {
-        if !check_func(entry_1, entry_2, &params) {
+    for check_func in &info.criteria {
+        if !check_func(entry_1, entry_2, &info) {
             result = false
         }
     }
@@ -207,14 +209,26 @@ fn check_reads(entry_1: &FastqEntry, entry_2: &FastqEntry, params: &RuntimeParam
 }
 
 
+fn write_stats_file(fp: std::path::PathBuf, info: RuntimeInfo) -> std::io::Result<()> {
+    let mut f = File::create(&fp)?;
+    println!("Stats: {:?}", &fp);
+    let report = format!(
+        "r1i {:?}\nr1o {:?}\nr2i {:?}\nr2o {:?}\nr1f {:?}\nr2f {:?}\nread_pairs_checked {}\nread_pairs_removed {}\nread_pairs_remaining {}\n",
+        info.args.i1, info.args.o1, info.args.i2, info.args.o2, info.args.f1, info.args.f2,
+        info.read_pairs_checked, info.read_pairs_removed, info.read_pairs_remaining
+    );
+    f.write(report.as_bytes());
+    Ok(())
+}
+
 
 fn main() -> std::io::Result<()> {
     let args = Cli::from_args();
 
-    let params = RuntimeParams::new(&args);
+    let mut info = RuntimeInfo::new(&args);
 
-    let mut i1_reader = FastqChecker::new(&args.i1);
-    let mut i2_reader = FastqChecker::new(&args.i2);
+    let mut checker_1 = FastqChecker::new(&args.i1);
+    let mut checker_2 = FastqChecker::new(&args.i2);
 
     let mut o1 = File::create(&args.o1)?;
     let mut o2 = File::create(&args.o2)?;
@@ -222,21 +236,19 @@ fn main() -> std::io::Result<()> {
     let mut f1 = File::create(&args.f1)?;
     let mut f2 = File::create(&args.f2)?;
 
-    let mut check_func: fn(entry_1: &FastqEntry, entry_2: &FastqEntry, params: &RuntimeParams) -> bool = check_read;
-    if !params.rm_tiles.is_empty() {
-        check_func = tile_check_read;
-    }
-
     loop {
-        let entry_1 = i1_reader.read_entry();
-        let entry_2 = i2_reader.read_entry();
+        let entry_1 = checker_1.read_entry();
+        let entry_2 = checker_2.read_entry();
 
         match (entry_1, entry_2) {
             (Some(mut e1), Some(mut e2)) => {
-                if !check_reads(&e1, &e2, &params) {
+                info.read_pairs_checked += 1;
+                if !check_reads(&e1, &e2, &info) {
+                    info.read_pairs_removed += 1;
                     e1.output(&mut f1);
                     e2.output(&mut f2);
                 } else {
+                    info.read_pairs_remaining += 1;
                     e1.output(&mut o1);
                     e2.output(&mut o2);
                 }
@@ -246,6 +258,13 @@ fn main() -> std::io::Result<()> {
                 break
             }
         }
+    }
+
+    match &info.args.stats_file {
+        Some(file_path) => {
+            write_stats_file(file_path.to_path_buf(), info);
+        },
+        None => {}
     }
 
     Ok(()) 

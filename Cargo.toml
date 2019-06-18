@@ -1,0 +1,10 @@
+[package]
+name = "rustq_filterer"
+version = "0.1.0"
+authors = ["Murray Wham <murray.wham@ed.ac.uk>"]
+edition = "2018"
+
+[dependencies]
+structopt = "0.2.10"
+flate2 = "1.0.7"
+

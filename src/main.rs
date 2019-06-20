@@ -6,39 +6,40 @@ use structopt::StructOpt;
 use flate2::read::GzDecoder;
 use std::io::{BufRead,BufReader,Write};
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 
 #[derive(StructOpt)]
 struct Cli {
     #[structopt(long="i1")]
-    i1: std::path::PathBuf,
+    i1: PathBuf,
 
     #[structopt(long="i2")]
-    i2: std::path::PathBuf,
+    i2: PathBuf,
 
     #[structopt(long="f1")]
-    f1: std::path::PathBuf,
+    f1: Option<PathBuf>,
 
     #[structopt(long="f2")]
-    f2: std::path::PathBuf,
+    f2: Option<PathBuf>,
 
     #[structopt(long="o1")]
-    o1: std::path::PathBuf,
+    o1: Option<PathBuf>,
 
     #[structopt(long="o2")]
-    o2: std::path::PathBuf,
+    o2: Option<PathBuf>,
 
     #[structopt(long="threshold", default_value="36")]
     len_threshold: usize,
 
     #[structopt(long="stats_file", parse(from_os_str))]
-    stats_file: Option<std::path::PathBuf>,
+    stats_file: Option<PathBuf>,
 
     #[structopt(long="remove_tiles")]
     remove_tiles: Vec<String>,
 
     #[structopt(long="remove_reads", parse(from_os_str))]
-    remove_reads: Option<std::path::PathBuf>,
+    remove_reads: Option<PathBuf>,
 
     #[structopt(long="trim_r1")]
     trim_r1: Option<i32>,
@@ -49,31 +50,33 @@ struct Cli {
 
 
 struct FastqEntry {
-    read_id: String,
+    id: String,
     seq: String,
     strand: String,
     qual: String,
-    tile_id: String
+    tile_id: String,
+    read_id: String
 }
 
 
 impl FastqEntry {
     fn new() -> FastqEntry {
         FastqEntry {
-            read_id: String::new(),
+            id: String::new(),
             seq: String::new(),
             strand: String::new(),
             qual: String::new(),
-            tile_id: String::new()
+            tile_id: String::new(),
+            read_id: String::new()
         }
     }
 
     fn to_string(&self) {
-        println!("read: {}seq: {}strand: {}qual: {}tile: {}", self.read_id, self.seq, self.strand, self.qual, self.tile_id);
+        println!("read: {}seq: {}strand: {}qual: {}tile: {}", self.id, self.seq, self.strand, self.qual, self.tile_id);
     }
 
     fn output(&mut self, file: &mut File) {
-        file.write(self.read_id.as_bytes());
+        file.write(self.id.as_bytes());
         file.write(self.seq.as_bytes());
         file.write(self.strand.as_bytes());
         file.write(self.qual.as_bytes());
@@ -87,7 +90,7 @@ struct FastqChecker {
 
 
 impl FastqChecker {
-    fn new(fp: &std::path::PathBuf) -> FastqChecker {
+    fn new(fp: &PathBuf) -> FastqChecker {
         FastqChecker {
             reader: BufReader::new(GzDecoder::new(File::open(fp).unwrap())),
         }
@@ -95,19 +98,24 @@ impl FastqChecker {
 
     fn read_entry(&mut self) -> Option<FastqEntry> {
         let mut entry = FastqEntry::new();
-        self.reader.read_line(&mut entry.read_id);
+        self.reader.read_line(&mut entry.id);
         self.reader.read_line(&mut entry.seq);
         self.reader.read_line(&mut entry.strand);
         self.reader.read_line(&mut entry.qual);
 
-        if entry.read_id.is_empty() ||
+        if entry.id.is_empty() ||
            entry.seq.is_empty() ||
            entry.strand.is_empty() ||
            entry.qual.is_empty() {
             None
         } else {
-            let parts = &mut entry.read_id.split(":");
-            entry.tile_id = parts.nth(4).unwrap().to_string();
+            let space = &entry.id.find(" ").unwrap();
+            let read_id = &entry.id[0..*space];
+            let parts = &mut read_id.split(":");
+            let tile_id = parts.nth(4).unwrap().to_string();
+
+            entry.tile_id = tile_id;
+            entry.read_id = read_id.to_string();
 
             Some(entry)
         }
@@ -120,6 +128,10 @@ struct RuntimeInfo<'a> {
     rm_tiles: HashSet<String>,
     rm_reads: HashSet<String>,
     criteria: Vec<&'a Fn(&FastqEntry, &FastqEntry, &RuntimeInfo) -> bool>,
+    f1: PathBuf,
+    f2: PathBuf,
+    o1: PathBuf,
+    o2: PathBuf,
     read_pairs_checked: i64,
     read_pairs_removed: i64,
     read_pairs_remaining: i64,
@@ -146,13 +158,37 @@ impl<'a> RuntimeInfo <'a>{
         }
 
         RuntimeInfo {
-            args: args,
-            rm_tiles: rm_tiles,
-            rm_reads: rm_reads,
-            criteria: criteria,
+            args,
+            rm_tiles,
+            rm_reads,
+            criteria,
+            f1: RuntimeInfo::infer_output_path(&args.f1, &args.i1, "_filtered_reads.fastq"),
+            f2: RuntimeInfo::infer_output_path(&args.f2, &args.i2, "_filtered_reads.fastq"),
+            o1: RuntimeInfo::infer_output_path(&args.o1, &args.i1, "_filtered.fastq"),
+            o2: RuntimeInfo::infer_output_path(&args.o2, &args.i2, "_filtered.fastq"),
             read_pairs_checked: 0,
             read_pairs_removed: 0,
             read_pairs_remaining: 0,
+        }
+    }
+
+        fn infer_output_path(fp: &Option<PathBuf>, input_file: &PathBuf, default_file_ext: &str) -> PathBuf {
+        match fp {
+            Some(file_path) => file_path.to_path_buf(),
+            None => {
+                let input_file_slice = input_file.to_str().unwrap();
+                let base;
+                if input_file_slice.ends_with(".fastq.gz") {
+                    base = &input_file_slice[0..input_file_slice.len()-9];
+                } else {
+                    base = &input_file_slice[0..input_file_slice.len()-6];
+                }
+
+                let mut output_file = base.to_string();
+                output_file.push_str(default_file_ext);
+                let output_file = PathBuf::from(output_file);
+                output_file
+            }
         }
     }
 
@@ -162,11 +198,13 @@ impl<'a> RuntimeInfo <'a>{
         }
     }
 
-    fn build_rm_reads(input_reads: std::path::PathBuf, output_reads: &mut HashSet<String>) -> std::io::Result<()> {
+    fn build_rm_reads(input_reads: PathBuf, output_reads: &mut HashSet<String>) -> std::io::Result<()> {
         let f = File::open(input_reads)?;
         let f = BufReader::new(f);
         for line in f.lines() {
-            output_reads.insert(line.unwrap());
+            let read_id = format!("@{}", line.unwrap().split(" ").nth(0).unwrap());
+            println!("{:?}", read_id);
+            output_reads.insert(read_id);
         }
         Ok(())
     }
@@ -209,15 +247,33 @@ fn check_reads(entry_1: &FastqEntry, entry_2: &FastqEntry, info: &RuntimeInfo) -
 }
 
 
-fn write_stats_file(fp: std::path::PathBuf, info: RuntimeInfo) -> std::io::Result<()> {
-    let mut f = File::create(&fp)?;
-    println!("Stats: {:?}", &fp);
-    let report = format!(
-        "r1i {:?}\nr1o {:?}\nr2i {:?}\nr2o {:?}\nr1f {:?}\nr2f {:?}\nread_pairs_checked {}\nread_pairs_removed {}\nread_pairs_remaining {}\n",
-        info.args.i1, info.args.o1, info.args.i2, info.args.o2, info.args.f1, info.args.f2,
-        info.read_pairs_checked, info.read_pairs_removed, info.read_pairs_remaining
+fn write_stats_file(fp: PathBuf, info: RuntimeInfo) -> std::io::Result<()> {
+    let mut report = format!(
+    "r1i {:?}\nr1o {:?}\nr1f {:?}\nr2i {:?}\nr2o {:?}\nr2f {:?}\n\
+        read_pairs_checked {}\nread_pairs_removed {}\nread_pairs_remaining {}\nfilter_threshold {}\n",
+    info.args.i1, info.o1, info.f1, info.args.i2, info.o2, info.f2,
+    info.read_pairs_checked, info.read_pairs_removed, info.read_pairs_remaining, info.args.len_threshold
     );
+
+    if !info.rm_tiles.is_empty() {
+        let mut rm_tiles = Vec::new();
+        for t in &info.rm_tiles {
+            rm_tiles.push(t);
+        }
+        rm_tiles.sort();
+        report = format!("{}remove_tiles {:?}\n", report, rm_tiles);
+    }
+
+    match &info.args.remove_reads {
+        Some(file_path) => {
+            report = format!("{}remove_reads {:?}\n", report, file_path.to_str());
+        },
+        None => {}
+    }
+
+    let mut f = File::create(&fp)?;
     f.write(report.as_bytes());
+
     Ok(())
 }
 
@@ -230,11 +286,11 @@ fn main() -> std::io::Result<()> {
     let mut checker_1 = FastqChecker::new(&args.i1);
     let mut checker_2 = FastqChecker::new(&args.i2);
 
-    let mut o1 = File::create(&args.o1)?;
-    let mut o2 = File::create(&args.o2)?;
+    let mut o1 = File::create(&info.o1)?;
+    let mut o2 = File::create(&info.o2)?;
 
-    let mut f1 = File::create(&args.f1)?;
-    let mut f2 = File::create(&args.f2)?;
+    let mut f1 = File::create(&info.f1)?;
+    let mut f2 = File::create(&info.f2)?;
 
     loop {
         let entry_1 = checker_1.read_entry();
@@ -269,6 +325,3 @@ fn main() -> std::io::Result<()> {
 
     Ok(()) 
 }
-
-// cargo run -- --f1 this --f2 that --i1 other --i2 another --o1 more --o2 things
-

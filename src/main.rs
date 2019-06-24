@@ -5,7 +5,7 @@ extern crate structopt;
 
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufRead,BufReader,Write};
+use std::io::{BufRead,BufReader,Write,BufWriter};
 use std::path::PathBuf;
 use flate2::read::GzDecoder;
 use log::{info,debug};
@@ -81,7 +81,7 @@ impl FastqEntry {
         )
     }
 
-    fn output(&mut self, file: &mut File) {
+    fn output(&mut self, file: &mut BufWriter<File>) {
         file.write(self.id.as_bytes());
         file.write(self.seq.as_bytes());
         file.write(self.strand.as_bytes());
@@ -296,11 +296,11 @@ fn main() -> std::io::Result<()> {
     let mut checker_1 = FastqChecker::new(&args.i1);
     let mut checker_2 = FastqChecker::new(&args.i2);
 
-    let mut o1 = File::create(&info.o1)?;
-    let mut o2 = File::create(&info.o2)?;
+    let mut o1 = BufWriter::new(File::create(&info.o1)?);
+    let mut o2 = BufWriter::new(File::create(&info.o2)?);
 
-    let mut f1 = File::create(&info.f1)?;
-    let mut f2 = File::create(&info.f2)?;
+    let mut f1 = BufWriter::new(File::create(&info.f1)?);
+    let mut f2 = BufWriter::new(File::create(&info.f2)?);
 
     loop {
         let entry_1 = checker_1.read_entry();

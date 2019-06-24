@@ -1,10 +1,12 @@
 [package]
 name = "rustq_filterer"
 version = "0.1.0"
-authors = ["Murray Wham <murray.wham@ed.ac.uk>"]
+authors = ["Murray Wham"]
 edition = "2018"
 
 [dependencies]
-structopt = "0.2.10"
+env_logger = "0.6.1"
 flate2 = "1.0.7"
+log = "0.4.6"
+structopt = "0.2.10"
 

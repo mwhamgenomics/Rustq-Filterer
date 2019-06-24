@@ -1,12 +1,15 @@
-extern crate structopt;
+extern crate env_logger;
 extern crate flate2;
+extern crate log;
+extern crate structopt;
 
-use std::fs::File;
-use structopt::StructOpt;
-use flate2::read::GzDecoder;
-use std::io::{BufRead,BufReader,Write};
 use std::collections::HashSet;
+use std::fs::File;
+use std::io::{BufRead,BufReader,Write};
 use std::path::PathBuf;
+use flate2::read::GzDecoder;
+use log::{info,debug};
+use structopt::StructOpt;
 
 
 #[derive(StructOpt)]
@@ -71,8 +74,11 @@ impl FastqEntry {
         }
     }
 
-    fn to_string(&self) {
-        println!("read: {}seq: {}strand: {}qual: {}tile: {}", self.id, self.seq, self.strand, self.qual, self.tile_id);
+    fn to_string(&self) -> String {
+        format!(
+            "read: {}seq: {}strand: {}qual: {}tile: {}",
+            self.id, self.seq, self.strand, self.qual, self.tile_id
+        )
     }
 
     fn output(&mut self, file: &mut File) {
@@ -137,6 +143,7 @@ struct RuntimeInfo<'a> {
     read_pairs_remaining: i64,
 }
 
+
 impl<'a> RuntimeInfo <'a>{
     fn new(args: &Cli) -> RuntimeInfo {
         let mut rm_tiles = HashSet::new();
@@ -151,7 +158,7 @@ impl<'a> RuntimeInfo <'a>{
 
         match &args.remove_reads {
             Some(file_path) => {
-                RuntimeInfo::build_rm_reads(file_path.to_path_buf(), &mut rm_reads);
+                RuntimeInfo::build_rm_reads(file_path.to_path_buf(), &mut rm_reads).expect("Could not build rm_reads from file");
                 criteria.push(&id_check_read);
             },
             None => {}
@@ -172,7 +179,7 @@ impl<'a> RuntimeInfo <'a>{
         }
     }
 
-        fn infer_output_path(fp: &Option<PathBuf>, input_file: &PathBuf, default_file_ext: &str) -> PathBuf {
+    fn infer_output_path(fp: &Option<PathBuf>, input_file: &PathBuf, default_file_ext: &str) -> PathBuf {
         match fp {
             Some(file_path) => file_path.to_path_buf(),
             None => {
@@ -193,17 +200,18 @@ impl<'a> RuntimeInfo <'a>{
     }
 
     fn build_rm_tiles(input_tiles: &Vec<String>, output_tiles: &mut HashSet<String>) {
+        debug!("Removing tiles: {:?}", input_tiles);
         for t in input_tiles {
             output_tiles.insert(t.to_string());
         }
     }
 
     fn build_rm_reads(input_reads: PathBuf, output_reads: &mut HashSet<String>) -> std::io::Result<()> {
+        debug!("Removing reads in {:?}", input_reads);
         let f = File::open(input_reads)?;
         let f = BufReader::new(f);
         for line in f.lines() {
             let read_id = format!("@{}", line.unwrap().split(" ").nth(0).unwrap());
-            println!("{:?}", read_id);
             output_reads.insert(read_id);
         }
         Ok(())
@@ -272,13 +280,15 @@ fn write_stats_file(fp: PathBuf, info: RuntimeInfo) -> std::io::Result<()> {
     }
 
     let mut f = File::create(&fp)?;
-    f.write(report.as_bytes());
+    f.write(report.as_bytes()).expect("Could not write stats file");
 
     Ok(())
 }
 
 
 fn main() -> std::io::Result<()> {
+    env_logger::init();
+    info!("Starting");
     let args = Cli::from_args();
 
     let mut info = RuntimeInfo::new(&args);
@@ -310,7 +320,7 @@ fn main() -> std::io::Result<()> {
                 }
             }
             _ => {
-                println!("Finished");
+                info!("Finished");
                 break
             }
         }
@@ -318,7 +328,7 @@ fn main() -> std::io::Result<()> {
 
     match &info.args.stats_file {
         Some(file_path) => {
-            write_stats_file(file_path.to_path_buf(), info);
+            write_stats_file(file_path.to_path_buf(), info).expect("Could not write stats file");
         },
         None => {}
     }

@@ -5,7 +5,7 @@ extern crate structopt;
 
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufRead,BufReader,Write,BufWriter};
+use std::io::{BufRead,BufReader,Write,BufWriter,Result};
 use std::path::PathBuf;
 use flate2::read::GzDecoder;
 use log::{info,debug};
@@ -74,109 +74,84 @@ impl FastqEntry {
         }
     }
 
+    fn clear(&mut self) {
+        self.id.clear();
+        self.seq.clear();
+        self.strand.clear();
+        self.qual.clear();
+        self.tile_id.clear();
+        self.read_id.clear();
+    }
+
     fn to_string(&self) -> String {
         format!(
             "read: {}seq: {}strand: {}qual: {}tile: {}",
             self.id, self.seq, self.strand, self.qual, self.tile_id
         )
     }
-
-    fn output(&mut self, file: &mut BufWriter<File>) {
-        file.write(self.id.as_bytes());
-        file.write(self.seq.as_bytes());
-        file.write(self.strand.as_bytes());
-        file.write(self.qual.as_bytes());
-    }
 }
 
 
-struct FastqChecker {
+struct FastqHandler {
     reader: BufReader<GzDecoder<File>>,
+    mask: FastqEntry,
+    output_file: BufWriter<File>,
+    filtered_file: BufWriter<File>
 }
 
 
-impl FastqChecker {
-    fn new(fp: &PathBuf) -> FastqChecker {
-        FastqChecker {
-            reader: BufReader::new(GzDecoder::new(File::open(fp).unwrap())),
+impl FastqHandler {
+    fn new(input_file: &PathBuf, output_file: &Option<PathBuf>, filtered_file: &Option<PathBuf>) -> FastqHandler {
+        let output_file = FastqHandler::infer_output_path(output_file, input_file, "_filtered.fastq");
+        let filtered_file = FastqHandler::infer_output_path(filtered_file, input_file, "_filtered_reads.fastq");
+
+        FastqHandler {
+            reader: BufReader::new(GzDecoder::new(File::open(input_file).unwrap())),
+            mask: FastqEntry::new(),
+            output_file: BufWriter::new(File::create(&output_file).expect("Could not open output file")),
+            filtered_file: BufWriter::new(File::create(&filtered_file).expect("Could not open filtered file"))
+
         }
     }
 
-    fn read_entry(&mut self) -> Option<FastqEntry> {
-        let mut entry = FastqEntry::new();
-        self.reader.read_line(&mut entry.id);
-        self.reader.read_line(&mut entry.seq);
-        self.reader.read_line(&mut entry.strand);
-        self.reader.read_line(&mut entry.qual);
+    fn is_empty(&self) -> bool {
+        self.mask.id.is_empty()
+    }
 
-        if entry.id.is_empty() ||
-           entry.seq.is_empty() ||
-           entry.strand.is_empty() ||
-           entry.qual.is_empty() {
-            None
-        } else {
-            let space = &entry.id.find(" ").unwrap();
-            let read_id = &entry.id[0..*space];
+    fn read_entry(&mut self) -> bool {
+        self.mask.clear();
+        self.reader.read_line(&mut self.mask.id).expect("Could not read from fastq");
+        self.reader.read_line(&mut self.mask.seq).expect("Could not read from fastq");
+        self.reader.read_line(&mut self.mask.strand).expect("Could not read from fastq");
+        self.reader.read_line(&mut self.mask.qual).expect("Could not read from fastq");
+
+        if !self.mask.id.is_empty() {
+            let space = &self.mask.id.find(" ").unwrap();
+            let read_id = &self.mask.id[0..*space];
             let parts = &mut read_id.split(":");
             let tile_id = parts.nth(4).unwrap().to_string();
 
-            entry.tile_id = tile_id;
-            entry.read_id = read_id.to_string();
+            self.mask.tile_id = tile_id;
+            self.mask.read_id = read_id.to_string();
 
-            Some(entry)
+            true
+        } else {
+            false
         }
     }
-}
 
+    fn output_entry(&mut self) {
+        self.output_file.write(self.mask.id.as_bytes());
+        self.output_file.write(self.mask.seq.as_bytes());
+        self.output_file.write(self.mask.strand.as_bytes());
+        self.output_file.write(self.mask.qual.as_bytes());
+    }
 
-struct RuntimeInfo<'a> {
-    args: &'a Cli,
-    rm_tiles: HashSet<String>,
-    rm_reads: HashSet<String>,
-    criteria: Vec<&'a Fn(&FastqEntry, &FastqEntry, &RuntimeInfo) -> bool>,
-    f1: PathBuf,
-    f2: PathBuf,
-    o1: PathBuf,
-    o2: PathBuf,
-    read_pairs_checked: i64,
-    read_pairs_removed: i64,
-    read_pairs_remaining: i64,
-}
-
-
-impl<'a> RuntimeInfo <'a>{
-    fn new(args: &Cli) -> RuntimeInfo {
-        let mut rm_tiles = HashSet::new();
-        let mut rm_reads = HashSet::new();
-
-        let mut criteria: Vec<&Fn(&FastqEntry, &FastqEntry, &RuntimeInfo) -> bool> = vec![&check_read];
-
-        if !args.remove_tiles.is_empty() {
-            RuntimeInfo::build_rm_tiles(&args.remove_tiles, &mut rm_tiles);
-            criteria.push(&tile_check_read);
-        }
-
-        match &args.remove_reads {
-            Some(file_path) => {
-                RuntimeInfo::build_rm_reads(file_path.to_path_buf(), &mut rm_reads).expect("Could not build rm_reads from file");
-                criteria.push(&id_check_read);
-            },
-            None => {}
-        }
-
-        RuntimeInfo {
-            args,
-            rm_tiles,
-            rm_reads,
-            criteria,
-            f1: RuntimeInfo::infer_output_path(&args.f1, &args.i1, "_filtered_reads.fastq"),
-            f2: RuntimeInfo::infer_output_path(&args.f2, &args.i2, "_filtered_reads.fastq"),
-            o1: RuntimeInfo::infer_output_path(&args.o1, &args.i1, "_filtered.fastq"),
-            o2: RuntimeInfo::infer_output_path(&args.o2, &args.i2, "_filtered.fastq"),
-            read_pairs_checked: 0,
-            read_pairs_removed: 0,
-            read_pairs_remaining: 0,
-        }
+    fn filter_entry(&mut self) {
+        self.filtered_file.write(self.mask.id.as_bytes());
+        self.filtered_file.write(self.mask.seq.as_bytes());
+        self.filtered_file.write(self.mask.strand.as_bytes());
+        self.filtered_file.write(self.mask.qual.as_bytes());
     }
 
     fn infer_output_path(fp: &Option<PathBuf>, input_file: &PathBuf, default_file_ext: &str) -> PathBuf {
@@ -198,6 +173,54 @@ impl<'a> RuntimeInfo <'a>{
             }
         }
     }
+}
+
+
+struct FastqPairChecker<'a> {
+    args: &'a Cli,
+    r1: FastqHandler,
+    r2: FastqHandler,
+    rm_tiles: HashSet<String>,
+    rm_reads: HashSet<String>,
+    criteria: Vec<&'a Fn(&Self) -> bool>,
+    read_pairs_checked: i64,
+    read_pairs_removed: i64,
+    read_pairs_remaining: i64,
+}
+
+
+impl<'a> FastqPairChecker <'a>{
+    fn new(args: &'a Cli) -> FastqPairChecker<'a> {
+        let mut rm_tiles = HashSet::new();
+        let mut rm_reads = HashSet::new();
+
+        let mut criteria: Vec<& Fn(&Self) -> bool> = vec![&FastqPairChecker::check_read];
+
+        if !args.remove_tiles.is_empty() {
+            FastqPairChecker::build_rm_tiles(&args.remove_tiles, &mut rm_tiles);
+            criteria.push(&FastqPairChecker::tile_check_read);
+        }
+
+        match &args.remove_reads {
+            Some(file_path) => {
+                FastqPairChecker::build_rm_reads(file_path.to_path_buf(), &mut rm_reads).expect("Could not build rm_reads from file");
+                criteria.push(&FastqPairChecker::id_check_read);
+            },
+            None => {}
+        }
+
+        FastqPairChecker {
+            args,
+            r1: FastqHandler::new(&args.i1, &args.o1, &args.f1),
+            r2: FastqHandler::new(&args.i2, &args.o2, &args.f2),
+            rm_tiles,
+            rm_reads,
+            criteria,
+            read_pairs_checked: 0,
+            read_pairs_removed: 0,
+            read_pairs_remaining: 0,
+        }
+    }
 
     fn build_rm_tiles(input_tiles: &Vec<String>, output_tiles: &mut HashSet<String>) {
         debug!("Removing tiles: {:?}", input_tiles);
@@ -206,7 +229,7 @@ impl<'a> RuntimeInfo <'a>{
         }
     }
 
-    fn build_rm_reads(input_reads: PathBuf, output_reads: &mut HashSet<String>) -> std::io::Result<()> {
+    fn build_rm_reads(input_reads: PathBuf, output_reads: &mut HashSet<String>) -> Result<()> {
         debug!("Removing reads in {:?}", input_reads);
         let f = File::open(input_reads)?;
         let f = BufReader::new(f);
@@ -216,122 +239,104 @@ impl<'a> RuntimeInfo <'a>{
         }
         Ok(())
     }
-}
 
-
-fn check_read(entry_1: &FastqEntry, entry_2: &FastqEntry, info: &RuntimeInfo) -> bool {
-    entry_1.seq.chars().count() > info.args.len_threshold && entry_2.seq.chars().count() > info.args.len_threshold
-}
-
-
-fn tile_check_read(entry_1: &FastqEntry, _entry_2: &FastqEntry, info: &RuntimeInfo) -> bool {
-    let tiles = &info.rm_tiles;
-    if tiles.contains(&entry_1.tile_id) {
-        false
-    } else {
-        true
+    fn check_read(&self) -> bool {
+        self.r1.mask.seq.chars().count() > self.args.len_threshold && self.r2.mask.seq.chars().count() > self.args.len_threshold
     }
-}
 
-
-fn id_check_read(entry_1: &FastqEntry, _entry_2: &FastqEntry, info: &RuntimeInfo) -> bool {
-    let reads = &info.rm_reads;
-    if reads.contains(&entry_1.read_id) {
-        false
-    } else {
-        true
-    }
-}
-   
-
-fn check_reads(entry_1: &FastqEntry, entry_2: &FastqEntry, info: &RuntimeInfo) -> bool {
-    let mut result: bool = true;
-    for check_func in &info.criteria {
-        if !check_func(entry_1, entry_2, &info) {
-            result = false
+    fn tile_check_read(&self) -> bool {
+        let tiles = &self.rm_tiles;
+        if tiles.contains(&self.r1.mask.tile_id) {
+            false
+        } else {
+            true
         }
     }
-    result
-}
 
-
-fn write_stats_file(fp: PathBuf, info: RuntimeInfo) -> std::io::Result<()> {
-    let mut report = format!(
-    "r1i {:?}\nr1o {:?}\nr1f {:?}\nr2i {:?}\nr2o {:?}\nr2f {:?}\n\
-        read_pairs_checked {}\nread_pairs_removed {}\nread_pairs_remaining {}\nfilter_threshold {}\n",
-    info.args.i1, info.o1, info.f1, info.args.i2, info.o2, info.f2,
-    info.read_pairs_checked, info.read_pairs_removed, info.read_pairs_remaining, info.args.len_threshold
-    );
-
-    if !info.rm_tiles.is_empty() {
-        let mut rm_tiles = Vec::new();
-        for t in &info.rm_tiles {
-            rm_tiles.push(t);
+    fn id_check_read(&self) -> bool {
+        let reads = &self.rm_reads;
+        if reads.contains(&self.r1.mask.read_id) {
+            false
+        } else {
+            true
         }
-        rm_tiles.sort();
-        report = format!("{}remove_tiles {:?}\n", report, rm_tiles);
     }
 
-    match &info.args.remove_reads {
-        Some(file_path) => {
-            report = format!("{}remove_reads {:?}\n", report, file_path.to_str());
-        },
-        None => {}
-    }
-
-    let mut f = File::create(&fp)?;
-    f.write(report.as_bytes()).expect("Could not write stats file");
-
-    Ok(())
-}
-
-
-fn main() -> std::io::Result<()> {
-    env_logger::init();
-    info!("Starting");
-    let args = Cli::from_args();
-
-    let mut info = RuntimeInfo::new(&args);
-
-    let mut checker_1 = FastqChecker::new(&args.i1);
-    let mut checker_2 = FastqChecker::new(&args.i2);
-
-    let mut o1 = BufWriter::new(File::create(&info.o1)?);
-    let mut o2 = BufWriter::new(File::create(&info.o2)?);
-
-    let mut f1 = BufWriter::new(File::create(&info.f1)?);
-    let mut f2 = BufWriter::new(File::create(&info.f2)?);
-
-    loop {
-        let entry_1 = checker_1.read_entry();
-        let entry_2 = checker_2.read_entry();
-
-        match (entry_1, entry_2) {
-            (Some(mut e1), Some(mut e2)) => {
-                info.read_pairs_checked += 1;
-                if !check_reads(&e1, &e2, &info) {
-                    info.read_pairs_removed += 1;
-                    e1.output(&mut f1);
-                    e2.output(&mut f2);
-                } else {
-                    info.read_pairs_remaining += 1;
-                    e1.output(&mut o1);
-                    e2.output(&mut o2);
-                }
+    fn check_reads(&self) -> bool {
+        let mut result: bool = true;
+        for check_func in &self.criteria {
+            if !check_func(self) {
+                result = false
             }
-            _ => {
+        }
+        result
+    }
+
+    fn write_stats_file(&self) -> Result<()> {
+        match &self.args.stats_file {
+            Some(file_path) => {
+                let mut report = format!(
+                    "r1i {:?}\nr1o {:?}\nr1f {:?}\nr2i {:?}\nr2o {:?}\nr2f {:?}\n\
+                    read_pairs_checked {}\nread_pairs_removed {}\nread_pairs_remaining {}\nfilter_threshold {}\n",
+                    self.args.i1, self.args.o1, self.args.f1, self.args.i2, self.args.o2, self.args.f2,
+                    self.read_pairs_checked, self.read_pairs_removed, self.read_pairs_remaining, self.args.len_threshold
+                );
+
+                if !self.rm_tiles.is_empty() {
+                    let mut rm_tiles = Vec::new();
+                    for t in &self.rm_tiles {
+                        rm_tiles.push(t);
+                    }
+                    rm_tiles.sort();
+                    report = format!("{}remove_tiles {:?}\n", report, rm_tiles);
+                }
+
+                match &self.args.remove_reads {
+                    Some(file_path) => {
+                        report = format!("{}remove_reads {:?}\n", report, file_path.to_str());
+                    },
+                    None => {}
+                }
+
+                let mut f = File::create(&file_path)?;
+                f.write(report.as_bytes()).expect("Could not write stats file");
+            },
+            None => {}
+        }
+        Ok(())
+    }
+
+    fn run(&mut self) -> Result<()> {
+        info!("Starting");
+        loop {
+            let read_1 = self.r1.read_entry();
+            let read_2 = self.r2.read_entry();
+
+            if read_1 && read_2 {
+                self.read_pairs_checked += 1;
+                if !self.check_reads() {
+                    self.read_pairs_removed += 1;
+                    self.r1.filter_entry();
+                    self.r2.filter_entry();
+                } else {
+                    self.read_pairs_remaining += 1;
+                    self.r1.output_entry();
+                    self.r2.output_entry();
+                }
+            } else {
                 info!("Finished");
                 break
             }
         }
+        self.write_stats_file();
+        Ok(())
     }
+}
 
-    match &info.args.stats_file {
-        Some(file_path) => {
-            write_stats_file(file_path.to_path_buf(), info).expect("Could not write stats file");
-        },
-        None => {}
-    }
 
-    Ok(()) 
+fn main() -> Result<()> {
+    env_logger::init();
+    let args = Cli::from_args();
+    let mut info = FastqPairChecker::new(&args);
+    info.run()
 }
